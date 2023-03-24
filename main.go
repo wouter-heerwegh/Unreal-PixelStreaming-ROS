@@ -32,18 +32,6 @@ var CirrusPort = flag.Int("CirrusPort", 80, "The port of the Cirrus signalling s
 // CirrusAddress - The address of the Cirrus signalling server that the Pixel Streaming instance is connected to.
 var CirrusAddress = flag.String("CirrusAddress", "192.168.66.67", "The address of the Cirrus signalling server that the Pixel Streaming instance is connected to.")
 
-// ForwardingAddress - The address to send the RTP stream to.
-var ForwardingAddress = flag.String("ForwardingAddress", "127.0.0.1", "The address to send the RTP stream to.")
-
-// RTPVideoForwardingPort - The port to use for sending the RTP video stream.
-var RTPVideoForwardingPort = flag.Int("RTPVideoForwardingPort", 4002, "The port to use for sending the RTP video stream.")
-
-// RTPAudioForwardingPort - The port to use for sending the RTP audio stream.
-var RTPAudioForwardingPort = flag.Int("RTPAudioForwardingPort", 4000, "The port to use for sending the RTP audio stream.")
-
-// RTPAudioPayloadType - The payload type of the RTP packet, 111 is OPUS.
-var RTPAudioPayloadType = flag.Uint("RTPAudioPayloadType", 111, "The payload type of the RTP packet, 111 is OPUS.")
-
 // RTPVideoPayloadType - The payload type of the RTP packet, 125 is H264 constrained baseline 2.0 in Chrome, with packetization mode of 1.
 var RTPVideoPayloadType = flag.Uint("RTPVideoPayloadType", 125, "The payload type of the RTP packet, 125 is H264 constrained baseline in Chrome.")
 
@@ -63,10 +51,6 @@ var pub *goroslib.Publisher
 
 var packet_buffer []rtp.Packet
 var lock sync.Mutex
-
-var ros_img_buffer []sensor_msgs.Image
-var ros_img_lock sync.Mutex
-
 
 type udpConn struct {
 	conn        *net.UDPConn
@@ -333,22 +317,6 @@ func setupMediaForwarding(peerConnection *webrtc.PeerConnection) {
 		}
 
 	})
-}
-
-func deplete_ros_buffer() {
-	ros_img := sensor_msgs.Image{}
-	for {
-		if len(ros_img_buffer) == 0 {
-			continue
-		}
-		
-		ros_img_lock.Lock()
-		// pop front
-		ros_img, ros_img_buffer = ros_img_buffer[0], ros_img_buffer[1:]
-		ros_img_lock.Unlock()
-		pub.Write(&ros_img)
-	}
-
 }
 
 func deplete_buffer() {

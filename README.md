@@ -1,4 +1,5 @@
-## Unreal Engine -> Pion WebRTC -> RTP Receiver
+## Unreal Engine -> Pion WebRTC -> ROS
+This is a forked repo from [TensorWorks](TensorWorks/Unreal-PixelStreaming-RTP-Bridge). The changes I made make it send ROS sensor_msgs/Image messages that it gathers from Unreal's pixelstreaming
 
 This is a proof of concept demonstrating pixel streaming from Unreal Engine to Pion's WebRTC, with Pion then forwarding RTP video/audio to FFPlay.
 

@@ -10,11 +10,16 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
+	"sync"
 	"log"
 	"net"
-	"net/url"
 	"time"
 
+	"github.com/aler9/goroslib"
+	"github.com/aler9/goroslib/pkg/msgs/sensor_msgs"
+	"github.com/aler9/gortsplib/v2/pkg/format"
+	"github.com/aler9/gortsplib/v2/pkg/url"
 	"github.com/gorilla/websocket"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
@@ -25,7 +30,7 @@ import (
 var CirrusPort = flag.Int("CirrusPort", 80, "The port of the Cirrus signalling server that the Pixel Streaming instance is connected to.")
 
 // CirrusAddress - The address of the Cirrus signalling server that the Pixel Streaming instance is connected to.
-var CirrusAddress = flag.String("CirrusAddress", "localhost", "The address of the Cirrus signalling server that the Pixel Streaming instance is connected to.")
+var CirrusAddress = flag.String("CirrusAddress", "192.168.66.67", "The address of the Cirrus signalling server that the Pixel Streaming instance is connected to.")
 
 // ForwardingAddress - The address to send the RTP stream to.
 var ForwardingAddress = flag.String("ForwardingAddress", "127.0.0.1", "The address to send the RTP stream to.")
@@ -45,14 +50,23 @@ var RTPVideoPayloadType = flag.Uint("RTPVideoPayloadType", 125, "The payload typ
 // RTCPIntervalMs - How often (ms) to send RTCP messages (such as REMB, PLI)
 var RTCPIntervalMs = flag.Int("RTCPIntervalMs", 2000, "How often (ms) to send RTCP message such as REMB, PLI.")
 
-//Whether or not to send PLI messages on an interval.
+// Whether or not to send PLI messages on an interval.
 var RTCPSendPLI = flag.Bool("RTCPSendPLI", true, "Whether or not to send PLI messages on an interval.")
 
-//Whether or not to send REMB messages on an interval.
+// Whether or not to send REMB messages on an interval.
 var RTCPSendREMB = flag.Bool("RTCPSendREMB", true, "Whether or not to send REMB messages on an interval.")
 
 // Receiver-side estimated maximum bitrate.
-var REMB = flag.Uint64("REMB", 400000000, "Receiver-side estimated maximum bitrate.")
+var REMB float32 = 400000000
+
+var pub *goroslib.Publisher
+
+var packet_buffer []rtp.Packet
+var lock sync.Mutex
+
+var ros_img_buffer []sensor_msgs.Image
+var ros_img_lock sync.Mutex
+
 
 type udpConn struct {
 	conn        *net.UDPConn
@@ -273,56 +287,12 @@ func sendLocalIceCandidate(wsConn *websocket.Conn, localIceCandidate *webrtc.ICE
 	fmt.Println(fmt.Sprintf("Sending our local ice candidate to UE...%s", jsonStr))
 }
 
-func createUDPConnection(address string, port int, payloadType uint8) (*udpConn, error) {
-
-	var udpConnection udpConn = udpConn{port: port, payloadType: payloadType}
-
-	// Create remote addr
-	var raddr *net.UDPAddr
-	var resolveRemoteErr error
-	if raddr, resolveRemoteErr = net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", address, port)); resolveRemoteErr != nil {
-		return nil, resolveRemoteErr
-	}
-
-	// Dial udp
-	var udpConnErr error
-	if udpConnection.conn, udpConnErr = net.DialUDP("udp", nil, raddr); udpConnErr != nil {
-		return nil, udpConnErr
-	}
-	return &udpConnection, nil
-}
-
-func setupMediaForwarding(peerConnection *webrtc.PeerConnection) (*udpConn, *udpConn) {
-
-	// Prepare udp conns
-	// Also update incoming packets with expected PayloadType, the browser may use
-	// a different value. We have to modify so our stream matches what rtp-forwarder.sdp expects
-	videoUDPConn, err := createUDPConnection(*ForwardingAddress, *RTPVideoForwardingPort, uint8(*RTPVideoPayloadType))
-
-	if err != nil {
-		log.Println(fmt.Sprintf("Error creating udp connection for video: " + err.Error()))
-	}
-
-	audioUDPConn, err := createUDPConnection(*ForwardingAddress, *RTPAudioForwardingPort, uint8(*RTPAudioPayloadType))
-
-	if err != nil {
-		log.Println(fmt.Sprintf("Error creating udp connection for audio: " + err.Error()))
-	}
+func setupMediaForwarding(peerConnection *webrtc.PeerConnection) {
 
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 
 		var trackType string = track.Kind().String()
 		fmt.Println(fmt.Sprintf("Got %s track from Unreal Engine Pixel Streaming WebRTC.", trackType))
-
-		var udpConnection *udpConn
-		switch trackType {
-		case "audio":
-			udpConnection = audioUDPConn
-		case "video":
-			udpConnection = videoUDPConn
-		default:
-			log.Println(fmt.Sprintf("Unsupported track type from Unreal Engine, track type: %s", trackType))
-		}
 
 		// Send RTCP message on an interval to the UE side. a PLI on an interval so that the publisher is pushing a keyframe every rtcpPLIInterval
 		go func() {
@@ -338,55 +308,156 @@ func setupMediaForwarding(peerConnection *webrtc.PeerConnection) (*udpConn, *udp
 
 				// Send REMB (receiver-side estimated maximum bandwidth)
 				if *RTCPSendREMB {
-					if rtcpErr := peerConnection.WriteRTCP([]rtcp.Packet{&rtcp.ReceiverEstimatedMaximumBitrate{Bitrate: *REMB, SSRCs: []uint32{uint32(track.SSRC())}}}); rtcpErr != nil {
+					if rtcpErr := peerConnection.WriteRTCP([]rtcp.Packet{&rtcp.ReceiverEstimatedMaximumBitrate{Bitrate: REMB, SSRCs: []uint32{uint32(track.SSRC())}}}); rtcpErr != nil {
 						fmt.Println(rtcpErr)
 					}
 				}
 			}
 		}()
 
-		b := make([]byte, 1500)
+		var err error
 		rtpPacket := &rtp.Packet{}
 		for {
 			// Read
-			n, _, readErr := track.Read(b)
-			if readErr != nil {
-				panic(readErr)
-			}
-
-			// Unmarshal the packet and update the PayloadType
-			if err = rtpPacket.Unmarshal(b[:n]); err != nil {
-				panic(err)
-			}
-			rtpPacket.PayloadType = udpConnection.payloadType
-
-			// Marshal into original buffer with updated PayloadType
-			if n, err = rtpPacket.MarshalTo(b); err != nil {
+			rtpPacket, _, err = track.ReadRTP()
+			if err != nil {
 				panic(err)
 			}
 
-			// Write
-			if _, err = udpConnection.conn.Write(b[:n]); err != nil {
-				// For this particular example, third party applications usually timeout after a short
-				// amount of time during which the user doesn't have enough time to provide the answer
-				// to the browser.
-				// That's why, for this particular example, the user first needs to provide the answer
-				// to the browser then open the third party application. Therefore we must not kill
-				// the forward on "connection refused" errors
-				if opError, ok := err.(*net.OpError); ok && opError.Err.Error() == "write: connection refused" {
-					continue
+			if track.Kind().String() == "video" {
+				if lock.TryLock() {
+					packet_buffer = append(packet_buffer, *rtpPacket.Clone())
+					lock.Unlock()
 				}
-				panic(err)
 			}
 		}
 
 	})
+}
 
-	return videoUDPConn, audioUDPConn
+func deplete_ros_buffer() {
+	ros_img := sensor_msgs.Image{}
+	for {
+		if len(ros_img_buffer) == 0 {
+			continue
+		}
+		
+		ros_img_lock.Lock()
+		// pop front
+		ros_img, ros_img_buffer = ros_img_buffer[0], ros_img_buffer[1:]
+		ros_img_lock.Unlock()
+		pub.Write(&ros_img)
+	}
+
+}
+
+func deplete_buffer() {
+	// go deplete_ros_buffer()
+	var packet rtp.Packet
+
+	// find the H264 media and format
+	var forma = format.H264{
+		PayloadTyp: 125,
+	}
+
+	// setup RTP/H264->H264 decoder
+	rtpDec := forma.CreateDecoder()
+
+	// setup H264->raw frames decoder
+	h264RawDec, err := newH264Decoder()
+	if err != nil {
+		panic(err)
+	}
+	defer h264RawDec.close()
+
+	ros_img := &sensor_msgs.Image{}
+	ros_img.Encoding = "rgba8"
+	start_stamp := time.Now()
+	var counter int
+	var overflow bool
+	for {
+		if len(packet_buffer) == 0 {
+			continue
+		}
+
+		lock.Lock()
+		// pop front
+		packet, packet_buffer = packet_buffer[0], packet_buffer[1:]
+		lock.Unlock()
+
+		// Decode rtp packet
+		nalus, stamp, err := rtpDec.Decode(&packet)
+		if err != nil {
+			// if err != rtph264.ErrNonStartingPacketAndNoPrevious && err != rtph264.ErrMorePacketsNeeded {
+			// 	log.Printf("ERR: %v", err)
+			// }
+			continue
+		}
+		
+		
+		for _, nalu := range nalus {
+			// convert NALUs into RGBA frames
+			img, err := h264RawDec.decode(nalu)
+			if err != nil {
+				panic(err)
+			}
+			
+			// Skip video frames if getting behind
+			if stamp != 0{
+				diff := (time.Now().Sub(start_stamp).Milliseconds() - stamp.Milliseconds())
+				if counter <= 0 {
+					overflow = false
+					counter = 2
+				}
+				if diff > 500 || overflow {
+					overflow = true
+					counter--
+					continue
+				}
+			}
+
+			// wait for a frame
+			if img == nil {
+				continue
+			}
+			
+			// Cast to image.RGBA and send over ros
+			if img_ok, ok := img.(*image.RGBA); ok {
+				ros_img.Data = img_ok.Pix
+				ros_img.Height = uint32(img_ok.Rect.Dy())
+				ros_img.Width = uint32(img_ok.Rect.Dx())
+
+				pub.Write(ros_img)
+			}
+		}
+
+	}
 }
 
 func main() {
 	flag.Parse()
+
+	// Setup ros node
+	n, err := goroslib.NewNode(goroslib.NodeConf{
+		Name:          "goroslib_pub",
+		MasterAddress: "FM00315-u:11311",
+	})
+
+	if err != nil {
+		panic(err)
+	}
+	defer n.Close()
+
+	// create a publisher
+	pub, err = goroslib.NewPublisher(goroslib.PublisherConf{
+		Node:  n,
+		Topic: "test_topic",
+		Msg:   &sensor_msgs.Image{},
+	})
+	if err != nil {
+		panic(err)
+	}
+	defer pub.Close()
 
 	// Setup a websocket connection between this application and the Cirrus webserver.
 	serverURL := url.URL{Scheme: "ws", Host: fmt.Sprintf("%s:%d", *CirrusAddress, *CirrusPort), Path: "/"}
@@ -438,9 +509,10 @@ func main() {
 		}
 	})
 
-	videoUDP, audioUDP := setupMediaForwarding(peerConnection)
-	defer videoUDP.conn.Close()
-	defer audioUDP.conn.Close()
+	setupMediaForwarding(peerConnection)
+
+	// Run a goroutine to deplete rtp buffer
+	go deplete_buffer()
 
 	sendOffer(wsConn, peerConnection)
 	startControlLoop(wsConn, peerConnection, &pendingCandidates)

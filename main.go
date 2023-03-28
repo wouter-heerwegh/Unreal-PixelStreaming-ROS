@@ -11,9 +11,9 @@ import (
 	"flag"
 	"fmt"
 	"image"
-	"sync"
 	"log"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/aler9/goroslib"
@@ -21,6 +21,8 @@ import (
 	"github.com/aler9/gortsplib/v2/pkg/format"
 	"github.com/aler9/gortsplib/v2/pkg/url"
 	"github.com/gorilla/websocket"
+	"github.com/pion/mediadevices"
+	"github.com/pion/mediadevices/pkg/codec/x264"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v3"
@@ -29,7 +31,7 @@ import (
 // CirrusPort - The port of the Cirrus signalling server that the Pixel Streaming instance is connected to.
 var CirrusPort = flag.Int("CirrusPort", 80, "The port of the Cirrus signalling server that the Pixel Streaming instance is connected to.")
 
-// CirrusAddress - The address of the Cirrus signalling server that the Pixel Streaming instance is connected to.
+// CirrusAddress - The address of the Cirrus signalling server that the Pixel Streaming instance is connected to.10.187.89.92
 var CirrusAddress = flag.String("CirrusAddress", "192.168.66.67", "The address of the Cirrus signalling server that the Pixel Streaming instance is connected to.")
 
 // RTPVideoPayloadType - The payload type of the RTP packet, 125 is H264 constrained baseline 2.0 in Chrome, with packetization mode of 1.
@@ -45,7 +47,7 @@ var RTCPSendPLI = flag.Bool("RTCPSendPLI", true, "Whether or not to send PLI mes
 var RTCPSendREMB = flag.Bool("RTCPSendREMB", true, "Whether or not to send REMB messages on an interval.")
 
 // Receiver-side estimated maximum bitrate.
-var REMB float32 = 400000000
+var REMB float32 = 1000000
 
 var pub *goroslib.Publisher
 
@@ -99,7 +101,16 @@ func createPeerConnection() (*webrtc.PeerConnection, error) {
 	m := webrtc.MediaEngine{}
 
 	// This sets up H.264, OPUS, etc.
-	m.RegisterDefaultCodecs()
+	// m.RegisterDefaultCodecs()
+	x264Params, err := x264.NewParams()
+	x264Params.Preset = x264.PresetFaster
+	x264Params.BitRate = 500_000 // 1mbps
+
+	codecSelector := mediadevices.NewCodecSelector(
+		mediadevices.WithVideoEncoders(&x264Params),
+	)
+	
+	codecSelector.Populate(&m)
 
 	// Create the API object with the MediaEngine
 	api := webrtc.NewAPI(webrtc.WithMediaEngine(&m))
@@ -117,12 +128,7 @@ func createPeerConnection() (*webrtc.PeerConnection, error) {
 	}
 
 	// Allow us to receive 1 audio track, and 1 video track in the "recvonly" mode
-	if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio, webrtc.RtpTransceiverInit{
-		Direction: webrtc.RTPTransceiverDirectionRecvonly,
-	}); err != nil {
-		log.Println("Error adding RTP audio transceiver: ", err)
-		return nil, err
-	} else if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RtpTransceiverInit{
+	if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo, webrtc.RtpTransceiverInit{
 		Direction: webrtc.RTPTransceiverDirectionRecvonly,
 	}); err != nil {
 		log.Println("Error adding RTP video transceiver: ", err)
@@ -370,7 +376,7 @@ func deplete_buffer() {
 				panic(err)
 			}
 			
-			// Skip video frames if getting behind
+			// Skip video frames i10.187.89.92f getting behind
 			if stamp != 0{
 				diff := (time.Now().Sub(start_stamp).Milliseconds() - stamp.Milliseconds())
 				if counter <= 0 {
@@ -394,7 +400,7 @@ func deplete_buffer() {
 				ros_img.Data = img_ok.Pix
 				ros_img.Height = uint32(img_ok.Rect.Dy())
 				ros_img.Width = uint32(img_ok.Rect.Dx())
-
+				ros_img.Header.Stamp = time.Now()
 				pub.Write(ros_img)
 			}
 		}
@@ -408,7 +414,7 @@ func main() {
 	// Setup ros node
 	n, err := goroslib.NewNode(goroslib.NodeConf{
 		Name:          "goroslib_pub",
-		MasterAddress: "FM00315-u:11311",
+		MasterAddress: "localhost:11311",
 	})
 
 	if err != nil {
